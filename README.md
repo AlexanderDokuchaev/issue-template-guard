@@ -5,8 +5,8 @@ A GitHub Action that checks whether newly opened or edited issues follow your
 
 When an issue is missing required sections, the action:
 
-- applies a configurable **label** (default `template-missing`), and
-- posts a configurable **comment** listing the missing sections.
+- applies a configurable **label** (default `template-missing`)
+- posts a configurable **comment**.
 
 When the issue is edited to include every required section, the label is
 removed and the comment is marked resolved. The action is idempotent — it edits
@@ -32,6 +32,7 @@ on:
     types: [opened, edited, reopened]
 
 permissions:
+  contents: read
   issues: write
 
 jobs:
@@ -64,12 +65,28 @@ comments.
 ## Notes
 
 - A non-compliant issue does **not** fail the check run — it is only labeled and
-  commented. The action fails only when no issue form templates can be found in
-  `.github/ISSUE_TEMPLATE` (a misconfiguration).
+  commented. The action fails when templates cannot be read or when no issue form
+   with required fields is found in `.github/ISSUE_TEMPLATE`
 - The `label_name` label is created automatically on first use if it does not
   exist. Pre-create it to control its color and description.
 - Only fields of type `input`, `textarea`, `dropdown`, and `checkboxes` marked
   `required: true` count as required sections. `markdown` blocks are ignored.
+
+## Limitations
+
+Templates are read with a small built-in line parser (no full YAML library), so
+keep `type`, `label`, and `validations.required` on their own lines - the layout
+the GitHub form editor produces. Block scalars (`label: |`), anchors, and aliases
+are not supported for labels.
+
+```yaml
+body:
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+```
 
 ## License
 
