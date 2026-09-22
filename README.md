@@ -88,6 +88,10 @@ body:
       required: true
 ```
 
+Idempotency (updating the existing comment instead of posting a new one) only
+looks at the first 100 comments on an issue. On issues with more comments than
+that, the marker comment may not be found and a new comment can be posted.
+
 ## License
 
 See [LICENSE](LICENSE).
