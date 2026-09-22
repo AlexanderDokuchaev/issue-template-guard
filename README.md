@@ -31,6 +31,10 @@ on:
   issues:
     types: [opened, edited, reopened]
 
+concurrency:
+  group: issue-template-guard-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   issues: write
