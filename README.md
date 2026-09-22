@@ -38,14 +38,14 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: AlexanderDokuchaev/issue-template-guard@v1
+      - uses: AlexanderDokuchaev/issue-template-guard@main
         with:
           label_name: template-missing
           message: |
             Thanks for opening this issue :wave:
 
-            This issue does not follow our issue template. Please edit it and
-            fill in every required section from the template.
+            It looks like this issue does not follow one of issue templates.
+            Issues that don't follow the template may not be triaged and closed after some time.
 ```
 
 ## Inputs

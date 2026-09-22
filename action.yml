@@ -17,8 +17,8 @@ inputs:
     default: |
       Thanks for opening this issue :wave:
 
-      It looks like this issue does not follow one of our issue templates.
-      Issues that don't follow the template may not be triaged.
+      It looks like this issue does not follow one of issue templates.
+      Issues that don't follow the template may not be triaged and closed after some time.
   token:
     description: 'GitHub token used to read templates and manage labels/comments.'
     required: false
@@ -28,7 +28,7 @@ runs:
   using: 'composite'
   steps:
     - name: Check issue against templates
-      uses: actions/github-script@v7
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
         INPUT_LABEL_NAME: ${{ inputs.label_name }}
         INPUT_MESSAGE: ${{ inputs.message }}
