@@ -1,0 +1,234 @@
+name: 'Issue Template Guard'
+description: 'Checks that new issues follow your issue form templates; labels and comments on issues that do not.'
+author: 'AlexanderDokuchaev'
+
+branding:
+  icon: 'check-square'
+  color: 'blue'
+
+inputs:
+  label_name:
+    description: 'Label applied to issues that do not follow a template.'
+    required: false
+    default: 'template-missing'
+  message:
+    description: 'Comment posted on issues that do not follow a template.'
+    required: false
+    default: |
+      Thanks for opening this issue :wave:
+
+      It looks like this issue does not follow one of issue templates.
+      Issues that don't follow the template may not be triaged and closed after some time.
+  token:
+    description: 'GitHub token used to read templates and manage labels/comments.'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check issue against templates
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        INPUT_LABEL_NAME: ${{ inputs.label_name }}
+        INPUT_MESSAGE: ${{ inputs.message }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const LABEL = (process.env.INPUT_LABEL_NAME || 'template-missing').trim();
+          const COMMENT_TEMPLATE = process.env.INPUT_MESSAGE || '';
+
+          // Standard GitHub location for issue form templates.
+          const TEMPLATE_DIR = '.github/ISSUE_TEMPLATE';
+
+          // Hidden HTML marker embedded in our comment so later runs can find
+          // and reuse it instead of posting a new comment every time.
+          const MARKER = '<!-- issue-template-guard -->';
+
+          // The issue that triggered this run. Fail if we're not on an
+          // "issues" event, since there is nothing to check.
+          const issue = context.payload.issue;
+          if (!issue) {
+            core.setFailed(`This action must run on "issues" events, but was triggered by "${context.eventName}".`);
+            return;
+          }
+          const body = issue.body || '';
+          const { owner, repo } = context.repo;
+
+          // --- Load issue form templates from the calling repo via the API ---
+          // We fetch the templates over the REST API (rather than the file
+          // system) so consumers don't need an actions/checkout step.
+          const templates = [];
+          let dirItems = [];
+          try {
+            // List everything inside .github/ISSUE_TEMPLATE.
+            const res = await github.rest.repos.getContent({ owner, repo, path: TEMPLATE_DIR });
+            dirItems = Array.isArray(res.data) ? res.data : [];
+          } catch (e) {
+            // Missing directory = misconfiguration, so fail the run.
+            core.setFailed(`Could not read templates in "${TEMPLATE_DIR}" (${e.status || e.message}).`);
+            return;
+          }
+
+          // Minimal parser for a GitHub issue form YAML file. It walks the file
+          // line by line and collects the labels of every *required* field that
+          // renders as a heading in the issue body.
+          const parseTemplate = (content) => {
+            const requiredHeadings = [];
+            let currentType = null;      // "type" of the field block we're inside
+            let currentLabel = null;     // its "label" (becomes the ### heading)
+            let currentRequired = false; // whether it is marked required
+            // Field types that render as a "### <label>" heading in the body.
+            const renderable = ['input', 'textarea', 'dropdown', 'checkboxes'];
+            // Called when a field block ends: keep its label if it is a required,
+            // heading-producing field, then reset the per-field state.
+            const flush = () => {
+              if (currentLabel && currentRequired && renderable.includes(currentType)) {
+                requiredHeadings.push(currentLabel);
+              }
+              currentType = null;
+              currentLabel = null;
+              currentRequired = false;
+            };
+            for (const rawLine of content.split('\n')) {
+              const line = rawLine.replace(/\s+$/, '');
+              // "- type: textarea" starts a new field block.
+              const typeMatch = line.match(/^\s*-\s+type:\s*(.+)$/);
+              if (typeMatch) {
+                flush();
+                currentType = typeMatch[1].trim().replace(/^["']|["']$/g, '');
+                continue;
+              }
+              // "label: Description" — the first label of the current field.
+              const labelMatch = line.match(/^\s*label:\s*(.+)$/);
+              if (labelMatch && currentLabel === null) {
+                currentLabel = labelMatch[1].trim().replace(/^["']|["']$/g, '');
+                continue;
+              }
+              // "required: true" under the field's validations.
+              if (/^\s*required:\s*true\b/.test(line)) {
+                currentRequired = true;
+              }
+            }
+            flush(); // don't forget the last field block
+            return requiredHeadings;
+          };
+
+          // Fetch and parse each template file, skipping non-YAML files and the
+          // special config.yml. Only templates that declare required fields are
+          // kept, since only those give us something to check against.
+          for (const item of dirItems) {
+            if (item.type !== 'file') continue;
+            if (!/\.ya?ml$/.test(item.name)) continue;
+            if (item.name === 'config.yml' || item.name === 'config.yaml') continue;
+            let content = '';
+            try {
+              // getContent on a single file returns base64-encoded content.
+              const fileRes = await github.rest.repos.getContent({ owner, repo, path: item.path });
+              content = Buffer.from(fileRes.data.content, 'base64').toString('utf8');
+            } catch (e) {
+              core.info(`Skipping ${item.path}: ${e.message}`);
+              continue;
+            }
+            const requiredHeadings = parseTemplate(content);
+
+            if (requiredHeadings.length > 0) {
+              templates.push({ file: item.name, requiredHeadings });
+            }
+          }
+
+          // No usable templates at all is also a misconfiguration -> fail.
+          if (templates.length === 0) {
+            core.setFailed(`No issue form templates with required fields found in "${TEMPLATE_DIR}".`);
+            return;
+          }
+
+          // Log the templates we discovered and the required sections each one
+          // enforces, so the run output makes it clear what was checked against.
+          core.startGroup(`Found ${templates.length} issue template(s) with required sections`);
+          for (const tpl of templates) {
+            core.info(`File: ${tpl.file} | Required headings: ${tpl.requiredHeadings.join(', ')}`);
+          }
+          core.endGroup();
+
+          // --- Determine best-matching template and missing headings ---------
+          const normalizedBody = body.toLowerCase();
+          const hasHeading = (heading) => {
+            // A section counts as present only when it appears as a Markdown
+            // heading (e.g. "### Description"), which is how issue forms render
+            // each field label. Plain text lines are ignored.
+            const escaped = heading.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp('^\\s*#{1,6}\\s+' + escaped + '\\s*$', 'm');
+            return re.test(normalizedBody);
+          };
+
+          // The issue is compliant if its body contains every required heading
+          // of at least one template. Stop at the first full match — we only
+          // care whether any template matches, not which one fits best.
+          let matchedTemplate = null;
+          for (const tpl of templates) {
+            if (tpl.requiredHeadings.every(hasHeading)) {
+              matchedTemplate = tpl;
+              break;
+            }
+          }
+
+          const compliant = matchedTemplate !== null;
+
+          // Log every Markdown heading present in the issue body, so the run
+          // output shows what the author actually filled in.
+          const bodyHeadings = (body.match(/^\s*#{1,6}\s+.+$/gm) || [])
+            .map((h) => h.replace(/^\s*#{1,6}\s+/, '').trim());
+          core.info(`Headings found in issue body: ${bodyHeadings.join(', ') || '(none)'}`);
+
+          if (compliant) {
+            core.info(`Issue matches template: ${matchedTemplate.file}`);
+          } else {
+            core.info('Issue does not match any template.');
+          }
+
+          // --- Locate our previous marker comment ----------------------------
+          // Look for a comment we posted earlier (identified by MARKER) so we can
+          // update it instead of adding duplicates. Also check whether the issue
+          // already carries our label.
+          const { data: comments } = await github.rest.issues.listComments({
+            owner, repo, issue_number: issue.number, per_page: 100,
+          });
+          const existing = comments.find((c) => (c.body || '').includes(MARKER));
+          const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l.name));
+          const hasLabel = labels.includes(LABEL);
+
+          if (!compliant) {
+            // Issue is missing sections: post the configured message as-is.
+            const commentBody = `${MARKER}\n` + COMMENT_TEMPLATE;
+
+            // Reuse our earlier comment if present, otherwise create a new one.
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: commentBody });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: commentBody });
+            }
+            // Add the label if it isn't already there.
+            if (!hasLabel) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: [LABEL] });
+            }
+            // Warn (but don't fail) so the violation is visible in the logs.
+            core.warning(`Issue #${issue.number} does not match any issue template.`);
+          } else {
+            // Issue now follows the template: clean up after ourselves by
+            // removing the label and marking our comment resolved.
+            if (hasLabel) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: LABEL });
+              } catch (e) {
+                core.info(`Could not remove label: ${e.message}`);
+              }
+            }
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id,
+                body: `${MARKER}\n:white_check_mark: Thanks! This issue now follows the template.`,
+              });
+            }
+            core.info(`Issue #${issue.number} follows the template.`);
+          }
